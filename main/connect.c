@@ -219,7 +219,8 @@ static void wifi_ssid_pwd_info_init(bool update)
         // Read
         printf("Reading ssid and passwd from NVS ... \n");
 
-        if (need_update == false) {
+        if (!need_update) {
+            // just read wifi config information from nvs.
             size_t wifi_info_len = 32;
             err = nvs_get_str(my_handle, "ssid", (char *)s_wifi_config.sta.ssid, &wifi_info_len);
             switch (err) {
@@ -253,6 +254,7 @@ static void wifi_ssid_pwd_info_init(bool update)
 
         // Write
         if (need_update) {
+            // just write new wifi config information to nvs.
             printf("Updating wifi ssid info in NVS ... ");
             err = nvs_set_str(my_handle, "ssid", (char *)s_wifi_config.sta.ssid);
             printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
