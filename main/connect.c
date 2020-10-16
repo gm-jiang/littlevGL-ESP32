@@ -28,6 +28,22 @@
 #define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
 #define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY
 
+static wifi_config_t s_wifi_config = {
+    .sta = {
+        .ssid = EXAMPLE_ESP_WIFI_SSID,
+        .password = EXAMPLE_ESP_WIFI_PASS,
+        /* Setting a password implies station will connect to all security modes including WEP/WPA.
+            * However these modes are deprecated and not advisable to be used. Incase your Access point
+            * doesn't support WPA2, these mode can be enabled by commenting below line */
+        .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+
+        .pmf_cfg = {
+            .capable = true,
+            .required = false
+        },
+    },
+};
+
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
 
@@ -88,23 +104,8 @@ void wifi_init_sta(void)
                                                         NULL,
                                                         &instance_got_ip));
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = EXAMPLE_ESP_WIFI_SSID,
-            .password = EXAMPLE_ESP_WIFI_PASS,
-            /* Setting a password implies station will connect to all security modes including WEP/WPA.
-             * However these modes are deprecated and not advisable to be used. Incase your Access point
-             * doesn't support WPA2, these mode can be enabled by commenting below line */
-	     .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-
-            .pmf_cfg = {
-                .capable = true,
-                .required = false
-            },
-        },
-    };
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &s_wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
@@ -121,10 +122,10 @@ void wifi_init_sta(void)
      * happened. */
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
-                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+                 s_wifi_config.sta.ssid, s_wifi_config.sta.password);
     } else if (bits & WIFI_FAIL_BIT) {
         ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s",
-                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+                 s_wifi_config.sta.ssid, s_wifi_config.sta.password);
     } else {
         ESP_LOGE(TAG, "UNEXPECTED EVENT");
     }
@@ -133,6 +134,79 @@ void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
     vEventGroupDelete(s_wifi_event_group);
+}
+
+void wifi_ssid_pwd_info_init(void)
+{
+    esp_err_t err = ESP_OK;
+    bool need_update = false;
+
+    // Open
+    printf("\n");
+    printf("Opening Non-Volatile Storage (NVS) handle... ");
+    nvs_handle_t my_handle;
+    err = nvs_open("storage", NVS_READWRITE, &my_handle);
+    if (err != ESP_OK) {
+        printf("Error (%s) opening NVS handle!\n", esp_err_to_name(err));
+    } else {
+        printf("Done\n");
+
+        // Read
+        printf("Reading ssid and passwd from NVS ... \n");
+
+        size_t wifi_info_len = 32;
+        err = nvs_get_str(my_handle, "ssid", (char *)s_wifi_config.sta.ssid, &wifi_info_len);
+        switch (err) {
+            case ESP_OK:
+                printf("Done\n");
+                printf("ssid = %s, len = %d\n", s_wifi_config.sta.ssid, wifi_info_len);
+                break;
+            case ESP_ERR_NVS_NOT_FOUND:
+                printf("The value is not initialized yet!\n");
+                need_update = true;
+                break;
+            default :
+                printf("Error (%s) reading!\n", esp_err_to_name(err));
+        }
+
+        wifi_info_len = 32;
+        err = nvs_get_str(my_handle, "passwd", (char *)s_wifi_config.sta.password, &wifi_info_len);
+        switch (err) {
+            case ESP_OK:
+                printf("Done\n");
+                printf("passwd = %s, len = %d\n", s_wifi_config.sta.password, wifi_info_len);
+                break;
+            case ESP_ERR_NVS_NOT_FOUND:
+                printf("The value is not initialized yet!\n");
+                need_update = true;
+                break;
+            default :
+                printf("Error (%s) reading!\n", esp_err_to_name(err));
+        }
+
+        // Write
+        if (need_update) {
+            printf("Updating wifi ssid info in NVS ... ");
+            err = nvs_set_str(my_handle, "ssid", (char *)s_wifi_config.sta.ssid);
+            printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+            printf("Updating wifi passwd info in NVS ... ");
+            err = nvs_set_str(my_handle, "passwd", (char *)s_wifi_config.sta.password);
+            printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+
+            // Commit written value.
+            // After setting any values, nvs_commit() must be called to ensure changes are written
+            // to flash storage. Implementations may write to storage at other times,
+            // but this is not guaranteed.
+            printf("Committing updates in NVS ... ");
+            err = nvs_commit(my_handle);
+            printf((err != ESP_OK) ? "Failed!\n" : "Done\n");
+        }
+
+        // Close
+        nvs_close(my_handle);
+    }
+
+    printf("\n");
 }
 
 void wifi_start(void)
@@ -144,6 +218,9 @@ void wifi_start(void)
       ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    //Get SSID and PASSWD from NVS
+    wifi_ssid_pwd_info_init();
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
