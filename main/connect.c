@@ -15,6 +15,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "esp_smartconfig.h"
 
 #include "lwip/err.h"
 #include "lwip/sys.h"
@@ -27,6 +28,9 @@
 #define EXAMPLE_ESP_WIFI_SSID      CONFIG_ESP_WIFI_SSID
 #define EXAMPLE_ESP_WIFI_PASS      CONFIG_ESP_WIFI_PASSWORD
 #define EXAMPLE_ESP_MAXIMUM_RETRY  CONFIG_ESP_MAXIMUM_RETRY
+
+static const int CONNECTED_BIT = BIT0;
+static const int ESPTOUCH_DONE_BIT = BIT1;
 
 static wifi_config_t s_wifi_config = {
     .sta = {
@@ -57,6 +61,9 @@ static const char *TAG = "wifi station";
 
 static int s_retry_num = 0;
 
+static void smartconfig_example_task(void * parm);
+static void wifi_ssid_pwd_info_init(bool update);
+
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
 {
@@ -68,7 +75,8 @@ static void event_handler(void* arg, esp_event_base_t event_base,
             s_retry_num++;
             ESP_LOGI(TAG, "retry to connect to the AP");
         } else {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+            xTaskCreate(smartconfig_example_task, "smartconfig_example_task", 4096, NULL, 3, NULL);
+            //xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
         }
         ESP_LOGI(TAG,"connect to the AP fail");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
@@ -76,6 +84,37 @@ static void event_handler(void* arg, esp_event_base_t event_base,
         ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    } else if (event_base == SC_EVENT && event_id == SC_EVENT_SCAN_DONE) {
+        ESP_LOGI(TAG, "Scan done");
+    } else if (event_base == SC_EVENT && event_id == SC_EVENT_FOUND_CHANNEL) {
+        ESP_LOGI(TAG, "Found channel");
+    } else if (event_base == SC_EVENT && event_id == SC_EVENT_GOT_SSID_PSWD) {
+        ESP_LOGI(TAG, "Got SSID and password");
+
+        smartconfig_event_got_ssid_pswd_t *evt = (smartconfig_event_got_ssid_pswd_t *)event_data;
+        wifi_config_t wifi_config;
+        uint8_t ssid[33] = { 0 };
+        uint8_t password[65] = { 0 };
+
+        bzero(&wifi_config, sizeof(wifi_config_t));
+        memcpy(wifi_config.sta.ssid, evt->ssid, sizeof(wifi_config.sta.ssid));
+        memcpy(wifi_config.sta.password, evt->password, sizeof(wifi_config.sta.password));
+        wifi_config.sta.bssid_set = evt->bssid_set;
+        if (wifi_config.sta.bssid_set == true) {
+            memcpy(wifi_config.sta.bssid, evt->bssid, sizeof(wifi_config.sta.bssid));
+        }
+
+        memcpy(ssid, evt->ssid, sizeof(evt->ssid));
+        memcpy(password, evt->password, sizeof(evt->password));
+        ESP_LOGI(TAG, "SSID:%s", ssid);
+        ESP_LOGI(TAG, "PASSWORD:%s", password);
+
+        memcpy(&s_wifi_config, &wifi_config, sizeof(wifi_config_t));
+        ESP_ERROR_CHECK( esp_wifi_disconnect() );
+        ESP_ERROR_CHECK( esp_wifi_set_config(ESP_IF_WIFI_STA, &s_wifi_config) );
+        ESP_ERROR_CHECK( esp_wifi_connect() );
+    } else if (event_base == SC_EVENT && event_id == SC_EVENT_SEND_ACK_DONE) {
+        xEventGroupSetBits(s_wifi_event_group, ESPTOUCH_DONE_BIT);
     }
 }
 
@@ -103,6 +142,11 @@ void wifi_init_sta(void)
                                                         &event_handler,
                                                         NULL,
                                                         &instance_got_ip));
+    ESP_ERROR_CHECK( esp_event_handler_instance_register(SC_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
     ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &s_wifi_config) );
@@ -133,13 +177,34 @@ void wifi_init_sta(void)
     /* The event will not be processed after unregister */
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, instance_got_ip));
     ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, instance_any_id));
-    vEventGroupDelete(s_wifi_event_group);
+    //vEventGroupDelete(s_wifi_event_group);
 }
 
-void wifi_ssid_pwd_info_init(void)
+static void smartconfig_example_task(void * parm)
+{
+    EventBits_t uxBits;
+    ESP_ERROR_CHECK( esp_smartconfig_set_type(SC_TYPE_ESPTOUCH) );
+    smartconfig_start_config_t cfg = SMARTCONFIG_START_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK( esp_smartconfig_start(&cfg) );
+    while (1) {
+        uxBits = xEventGroupWaitBits(s_wifi_event_group, CONNECTED_BIT | ESPTOUCH_DONE_BIT, true, false, portMAX_DELAY); 
+        if(uxBits & CONNECTED_BIT) {
+            ESP_LOGI(TAG, "WiFi Connected to ap");
+        }
+        if(uxBits & ESPTOUCH_DONE_BIT) {
+            ESP_LOGI(TAG, "smartconfig over");
+            esp_smartconfig_stop();
+            wifi_ssid_pwd_info_init(true);
+            vEventGroupDelete(s_wifi_event_group);
+            vTaskDelete(NULL);
+        }
+    }
+}
+
+static void wifi_ssid_pwd_info_init(bool update)
 {
     esp_err_t err = ESP_OK;
-    bool need_update = false;
+    bool need_update = update;
 
     // Open
     printf("\n");
@@ -154,34 +219,36 @@ void wifi_ssid_pwd_info_init(void)
         // Read
         printf("Reading ssid and passwd from NVS ... \n");
 
-        size_t wifi_info_len = 32;
-        err = nvs_get_str(my_handle, "ssid", (char *)s_wifi_config.sta.ssid, &wifi_info_len);
-        switch (err) {
-            case ESP_OK:
-                printf("Done\n");
-                printf("ssid = %s, len = %d\n", s_wifi_config.sta.ssid, wifi_info_len);
-                break;
-            case ESP_ERR_NVS_NOT_FOUND:
-                printf("The value is not initialized yet!\n");
-                need_update = true;
-                break;
-            default :
-                printf("Error (%s) reading!\n", esp_err_to_name(err));
-        }
+        if (need_update == false) {
+            size_t wifi_info_len = 32;
+            err = nvs_get_str(my_handle, "ssid", (char *)s_wifi_config.sta.ssid, &wifi_info_len);
+            switch (err) {
+                case ESP_OK:
+                    printf("Done\n");
+                    printf("ssid = %s, len = %d\n", s_wifi_config.sta.ssid, wifi_info_len);
+                    break;
+                case ESP_ERR_NVS_NOT_FOUND:
+                    printf("The value is not initialized yet!\n");
+                    need_update = true;
+                    break;
+                default :
+                    printf("Error (%s) reading!\n", esp_err_to_name(err));
+            }
 
-        wifi_info_len = 32;
-        err = nvs_get_str(my_handle, "passwd", (char *)s_wifi_config.sta.password, &wifi_info_len);
-        switch (err) {
-            case ESP_OK:
-                printf("Done\n");
-                printf("passwd = %s, len = %d\n", s_wifi_config.sta.password, wifi_info_len);
-                break;
-            case ESP_ERR_NVS_NOT_FOUND:
-                printf("The value is not initialized yet!\n");
-                need_update = true;
-                break;
-            default :
-                printf("Error (%s) reading!\n", esp_err_to_name(err));
+            wifi_info_len = 32;
+            err = nvs_get_str(my_handle, "passwd", (char *)s_wifi_config.sta.password, &wifi_info_len);
+            switch (err) {
+                case ESP_OK:
+                    printf("Done\n");
+                    printf("passwd = %s, len = %d\n", s_wifi_config.sta.password, wifi_info_len);
+                    break;
+                case ESP_ERR_NVS_NOT_FOUND:
+                    printf("The value is not initialized yet!\n");
+                    need_update = true;
+                    break;
+                default :
+                    printf("Error (%s) reading!\n", esp_err_to_name(err));
+            }
         }
 
         // Write
@@ -220,7 +287,7 @@ void wifi_start(void)
     ESP_ERROR_CHECK(ret);
 
     //Get SSID and PASSWD from NVS
-    wifi_ssid_pwd_info_init();
+    wifi_ssid_pwd_info_init(false);
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
